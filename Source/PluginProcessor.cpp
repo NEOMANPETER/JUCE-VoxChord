@@ -460,7 +460,7 @@ bool VoxChordProcessor::exportMidi (const juce::File& file, int part, bool annou
         }
     }
 
-    auto addNote = [] (juce::MidiMessageSequence& seq, int ch, int num, int vel, double startBeat, double durBeat)
+    auto addNote = [ppq] (juce::MidiMessageSequence& seq, int ch, int num, int vel, double startBeat, double durBeat)
     {
         auto on = juce::MidiMessage::noteOn (ch, num, (juce::uint8) vel);
         on.setTimeStamp (startBeat * ppq);
