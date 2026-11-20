@@ -112,7 +112,12 @@ public:
     bool isRecording() const { return recording.load(); }
     void loadAudioFile (const juce::File& file);
     void rebuild();                      // re-quantise / re-detect key / re-make chords from the raw notes
-    bool exportMidi (const juce::File& file);
+    // part: 0 = melody + chords, 1 = melody only, 2 = chords only
+    bool exportMidi (const juce::File& file, int part = 0, bool announce = true);
+    void toggleAudition();               // play the result with the built-in sound, no host needed
+    bool isAuditioning() const { return auditioning.load(); }
+    float getInputLevel();               // 0..1 microphone level while recording
+    double getRecordSeconds() const { return recSampleRate > 0 ? (double) writePos.load() / recSampleRate : 0.0; }
     double getHostBpm() const { return hostBpm.load(); }
 
     struct Snapshot
@@ -132,6 +137,7 @@ private:
 
     void setStatus (const juce::String& s);
     void analyseAsync (std::shared_ptr<std::vector<float>> mono, double sr);
+    void runAnalysis (const std::vector<float>& mono, double sr);
 
     // AudioIODeviceCallback (microphone capture)
     void audioDeviceIOCallbackWithContext (const float* const* inputChannelData, int numInputChannels,
@@ -150,6 +156,7 @@ private:
     vc::KeyInfo key;
     double loopBeats = 0.0;
     juce::String status { "Ready. Record your voice or load an audio file." };
+    juce::String diag;
 
     // recording
     std::unique_ptr<juce::AudioDeviceManager> deviceManager;
@@ -157,6 +164,10 @@ private:
     std::atomic<int> writePos { 0 };
     double recSampleRate = 44100.0;
     std::atomic<bool> recording { false };
+    std::atomic<float> inputPeak { 0.0f };
+    std::atomic<bool> auditioning { false };
+    std::atomic<bool> auditionRestart { false };
+    double auditionPos = 0.0;
 
     juce::AudioFormatManager formats;
     juce::ThreadPool pool { 1 };

@@ -26,17 +26,20 @@ struct PitchFrame { double timeSec; float midi; float rms; bool voiced; };
 // ---------------------------------------------------------------------------
 // 1. Pitch tracking (YIN algorithm) on a mono signal
 // ---------------------------------------------------------------------------
-inline std::vector<PitchFrame> trackPitch (const std::vector<float>& input, double sr)
+struct AnalysisStats { double durationSec = 0.0; float peak = 0.0f; int frames = 0; int voiced = 0; };
+
+inline std::vector<PitchFrame> trackPitch (const std::vector<float>& input, double sr, AnalysisStats* stats = nullptr)
 {
     std::vector<PitchFrame> out;
-    if (input.size() < 4096 || sr <= 0.0)
+    if (stats) *stats = AnalysisStats();
+    if (sr <= 0.0)
         return out;
 
     float peak = 0.0f;
     for (float s : input) peak = std::max (peak, std::fabs (s));
-    if (peak < 1.0e-4f)
+    if (stats) { stats->durationSec = (double) input.size() / sr; stats->peak = peak; }
+    if (input.size() < 4096 || peak < 1.0e-4f)
         return out;
-    const float gain = 0.9f / peak;
 
     // decimate to ~12 kHz (box filter) to make analysis fast
     const int dec = std::max (1, (int) std::lround (sr / 12000.0));
@@ -46,7 +49,14 @@ inline std::vector<PitchFrame> trackPitch (const std::vector<float>& input, doub
     {
         float acc = 0.0f;
         for (int k = 0; k < dec; ++k) acc += input[i * (size_t) dec + (size_t) k];
-        x[i] = acc / (float) dec * gain;
+        x[i] = acc / (float) dec;
+    }
+
+    // high-pass (~50 Hz) removes DC offset, desk thumps and mains rumble
+    {
+        float px = 0.0f, py = 0.0f;
+        const float R = 0.975f;
+        for (auto& v : x) { const float in = v; const float y = in - px + R * py; px = in; py = y; v = y; }
     }
 
     const int W = 512;
@@ -57,19 +67,29 @@ inline std::vector<PitchFrame> trackPitch (const std::vector<float>& input, doub
     if ((int) x.size() < need)
         return out;
 
-    std::vector<double> d ((size_t) tauMax + 1), cm ((size_t) tauMax + 1);
-
+    // pass 1: loudness of every frame, to set a gate relative to how loud YOU sing
+    std::vector<float> frameRms;
     for (size_t pos = 0; pos + (size_t) need <= x.size(); pos += (size_t) hop)
     {
-        const float* f = &x[pos];
-
         double e = 0.0;
-        for (int j = 0; j < W; ++j) e += (double) f[j] * f[j];
-        const float rms = (float) std::sqrt (e / W);
+        for (int j = 0; j < W; ++j) e += (double) x[pos + (size_t) j] * x[pos + (size_t) j];
+        frameRms.push_back ((float) std::sqrt (e / W));
+    }
+    std::vector<float> sorted = frameRms;
+    std::sort (sorted.begin(), sorted.end());
+    const float p90 = sorted[(size_t) ((double) sorted.size() * 0.9)];
+    const float gate = std::max (0.0012f, 0.12f * p90);
+
+    std::vector<double> d ((size_t) tauMax + 1), cm ((size_t) tauMax + 1);
+    size_t fi = 0;
+    for (size_t pos = 0; pos + (size_t) need <= x.size(); pos += (size_t) hop, ++fi)
+    {
+        const float* f = &x[pos];
+        const float rms = frameRms[fi];
 
         PitchFrame pf { ((double) pos + W / 2.0) * dec / sr, 0.0f, rms, false };
 
-        if (rms > 0.02f)
+        if (rms > gate)
         {
             for (int tau = 1; tau <= tauMax; ++tau)
             {
@@ -93,7 +113,7 @@ inline std::vector<PitchFrame> trackPitch (const std::vector<float>& input, doub
             int best = -1;
             for (int tau = tauMin; tau <= tauMax; ++tau)
             {
-                if (cm[(size_t) tau] < 0.15)
+                if (cm[(size_t) tau] < 0.20)
                 {
                     while (tau + 1 <= tauMax && cm[(size_t) tau + 1] < cm[(size_t) tau]) ++tau;
                     best = tau;
@@ -105,7 +125,7 @@ inline std::vector<PitchFrame> trackPitch (const std::vector<float>& input, doub
                 int mt = tauMin;
                 for (int tau = tauMin; tau <= tauMax; ++tau)
                     if (cm[(size_t) tau] < cm[(size_t) mt]) mt = tau;
-                if (cm[(size_t) mt] < 0.30) best = mt;
+                if (cm[(size_t) mt] < 0.40) best = mt;
             }
 
             if (best > 0)
@@ -125,6 +145,7 @@ inline std::vector<PitchFrame> trackPitch (const std::vector<float>& input, doub
                 }
             }
         }
+        if (stats) { stats->frames++; if (pf.voiced) stats->voiced++; }
         out.push_back (pf);
     }
     return out;
@@ -170,11 +191,11 @@ inline std::vector<RawNote> segmentNotes (const std::vector<PitchFrame>& frames)
         if (active && ! vals.empty())
         {
             const double dur = lastT - start + hop;
-            if (dur >= 0.08)
+            if (dur >= 0.07)
             {
                 const int m = (int) std::lround (medianOf (vals));
                 const float rms = (float) (rmsSum / (double) vals.size());
-                const int vel = std::clamp ((int) (40.0f + rms * 250.0f), 50, 120);
+                const int vel = std::clamp ((int) (50.0f + rms * 600.0f), 55, 120);
                 notes.push_back ({ std::max (0.0, start), dur, m, vel });
             }
         }
@@ -189,7 +210,7 @@ inline std::vector<RawNote> segmentNotes (const std::vector<PitchFrame>& frames)
         if (frames[i].voiced)
         {
             const float m = sm[i];
-            if (active && std::fabs (m - medianOf (vals)) > 0.75f)
+            if (active && std::fabs (m - medianOf (vals)) > 0.8f)
                 closeNote();
 
             if (! active)
@@ -298,6 +319,24 @@ inline KeyInfo detectKey (const std::vector<Note>& notes)
     }
     k.name = std::string (pcName (k.root)) + (k.minor ? " minor" : " major");
     return k;
+}
+
+// ---------------------------------------------------------------------------
+// 4b. Snap every note to the nearest note of the detected scale
+//     (fixes small tuning slips, like the "key quantizer" in voice-to-MIDI tools)
+// ---------------------------------------------------------------------------
+inline void snapToKey (std::vector<Note>& notes, const KeyInfo& key)
+{
+    static const bool majS[12] = { 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1 };
+    static const bool minS[12] = { 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0 };
+    const bool* sc = key.minor ? minS : majS;
+    auto inScale = [&] (int m) { return sc[(((m - key.root) % 12) + 12) % 12]; };
+    for (auto& n : notes)
+        for (int d = 0; d <= 6; ++d)
+        {
+            if (inScale (n.midi - d)) { n.midi -= d; break; }
+            if (inScale (n.midi + d)) { n.midi += d; break; }
+        }
 }
 
 // ---------------------------------------------------------------------------

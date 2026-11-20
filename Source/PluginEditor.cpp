@@ -10,12 +10,16 @@ const juce::Colour textCol  { 0xffe8eaf0 };
 }
 
 VoxChordEditor::VoxChordEditor (VoxChordProcessor& p)
-    : AudioProcessorEditor (&p), proc (p)
+    : AudioProcessorEditor (&p), proc (p),
+      melodyPad (p, 1, "Drag melody MIDI into FL", accent),
+      chordPad (p, 2, "Drag chords MIDI into FL", chordCol)
 {
-    setSize (680, 470);
+    setSize (700, 560);
 
-    for (auto* b : { &recordBtn, &loadBtn, &rebuildBtn, &exportBtn, &hostBpmBtn })
+    for (auto* b : { &recordBtn, &playBtn, &loadBtn, &rebuildBtn, &exportBtn, &hostBpmBtn })
         addAndMakeVisible (*b);
+    addAndMakeVisible (melodyPad);
+    addAndMakeVisible (chordPad);
 
     recordBtn.setColour (juce::TextButton::buttonColourId, juce::Colour (0xffb3333a));
 
@@ -39,7 +43,7 @@ VoxChordEditor::VoxChordEditor (VoxChordProcessor& p)
     addAndMakeVisible (gridBox);
     addAndMakeVisible (chordLenBox);
 
-    for (auto* t : { &melodyToggle, &chordToggle, &previewToggle })
+    for (auto* t : { &melodyToggle, &chordToggle, &previewToggle, &snapToggle })
     {
         t->setColour (juce::ToggleButton::textColourId, textCol);
         addAndMakeVisible (*t);
@@ -57,6 +61,8 @@ VoxChordEditor::VoxChordEditor (VoxChordProcessor& p)
     melodyAtt    = std::make_unique<ButtonAtt> (proc.apvts, "melody", melodyToggle);
     chordAtt     = std::make_unique<ButtonAtt> (proc.apvts, "chords", chordToggle);
     previewAtt   = std::make_unique<ButtonAtt> (proc.apvts, "preview", previewToggle);
+    snapAtt      = std::make_unique<ButtonAtt> (proc.apvts, "snap", snapToggle);
+    snapToggle.onClick = [this] { proc.rebuild(); };
 
     // changing quantise / chord length rebuilds right away
     gridBox.onChange     = [this] { proc.rebuild(); };
@@ -90,6 +96,7 @@ VoxChordEditor::VoxChordEditor (VoxChordProcessor& p)
     };
 
     rebuildBtn.onClick = [this] { proc.rebuild(); };
+    playBtn.onClick = [this] { proc.toggleAudition(); };
 
     hostBpmBtn.onClick = [this]
     {
@@ -119,7 +126,7 @@ VoxChordEditor::VoxChordEditor (VoxChordProcessor& p)
     };
 
     snap = proc.getSnapshot();
-    startTimerHz (8);
+    startTimerHz (15);
 }
 
 VoxChordEditor::~VoxChordEditor()
@@ -130,7 +137,11 @@ VoxChordEditor::~VoxChordEditor()
 void VoxChordEditor::timerCallback()
 {
     snap = proc.getSnapshot();
-    recordBtn.setButtonText (proc.isRecording() ? "Stop" : "Record");
+    recordingNow = proc.isRecording();
+    level = recordingNow ? proc.getInputLevel() : 0.0f;
+    recSeconds = proc.getRecordSeconds();
+    recordBtn.setButtonText (recordingNow ? "Stop" : "Record");
+    playBtn.setButtonText (proc.isAuditioning() ? "Stop play" : "Play");
     repaint();
 }
 
@@ -141,7 +152,7 @@ void VoxChordEditor::resized()
 
     auto row = r.removeFromTop (30);
     const int w = (row.getWidth() - 4 * 8) / 5;
-    for (auto* b : { &recordBtn, &loadBtn, &rebuildBtn, &exportBtn, &hostBpmBtn })
+    for (auto* b : { &recordBtn, &playBtn, &loadBtn, &rebuildBtn, &exportBtn })
     {
         b->setBounds (row.removeFromLeft (w));
         row.removeFromLeft (8);
@@ -149,24 +160,33 @@ void VoxChordEditor::resized()
 
     r.removeFromTop (12);
     auto row1 = r.removeFromTop (26);
-    bpmSlider.setBounds (row1.removeFromLeft (300).withTrimmedLeft (90));
-    row1.removeFromLeft (20);
-    gridBox.setBounds (row1.removeFromLeft (200).withTrimmedLeft (70));
+    bpmSlider.setBounds (row1.removeFromLeft (290).withTrimmedLeft (90));
+    row1.removeFromLeft (10);
+    hostBpmBtn.setBounds (row1.removeFromLeft (110));
+    row1.removeFromLeft (10);
+    gridBox.setBounds (row1.removeFromLeft (190).withTrimmedLeft (70));
 
     r.removeFromTop (8);
     auto row2 = r.removeFromTop (26);
-    transposeSlider.setBounds (row2.removeFromLeft (300).withTrimmedLeft (90));
-    row2.removeFromLeft (20);
-    chordLenBox.setBounds (row2.removeFromLeft (200).withTrimmedLeft (90));
+    transposeSlider.setBounds (row2.removeFromLeft (290).withTrimmedLeft (90));
+    row2.removeFromLeft (130);
+    chordLenBox.setBounds (row2.removeFromLeft (190).withTrimmedLeft (90));
 
     r.removeFromTop (8);
     auto row3 = r.removeFromTop (24);
-    melodyToggle.setBounds (row3.removeFromLeft (210));
-    chordToggle.setBounds (row3.removeFromLeft (210));
-    previewToggle.setBounds (row3.removeFromLeft (150));
+    melodyToggle.setBounds (row3.removeFromLeft (170));
+    chordToggle.setBounds (row3.removeFromLeft (170));
+    previewToggle.setBounds (row3.removeFromLeft (140));
+    snapToggle.setBounds (row3.removeFromLeft (130));
 
     r.removeFromTop (10);
-    r.removeFromBottom (44); // status area
+    auto pads = r.removeFromTop (38);
+    melodyPad.setBounds (pads.removeFromLeft ((pads.getWidth() - 8) / 2));
+    pads.removeFromLeft (8);
+    chordPad.setBounds (pads);
+
+    r.removeFromTop (10);
+    r.removeFromBottom (60); // status area
     rollArea = r;
 }
 
@@ -236,10 +256,24 @@ void VoxChordEditor::paint (juce::Graphics& g)
                           rollArea, juce::Justification::centred, 3);
     }
 
+    // microphone level meter while recording
+    if (recordingNow)
+    {
+        auto m = juce::Rectangle<float> ((float) getWidth() - 214.0f, (float) getHeight() - 40.0f, 200.0f, 12.0f);
+        g.setColour (panel);
+        g.fillRoundedRectangle (m, 4.0f);
+        g.setColour (level > 0.9f ? juce::Colours::red : accent);
+        g.fillRoundedRectangle (m.withWidth (std::max (3.0f, m.getWidth() * level)), 4.0f);
+        g.setColour (textCol.withAlpha (0.7f));
+        g.setFont (12.0f);
+        g.drawText ("mic level   " + juce::String (recSeconds, 1) + " s", m.translated (-130.0f, 0.0f).withWidth (126.0f),
+                    juce::Justification::right);
+    }
+
     // status
     g.setColour (textCol);
     g.setFont (14.0f);
-    g.drawFittedText (snap.status, 14, getHeight() - 44, getWidth() - 28, 20, juce::Justification::left, 1);
+    g.drawFittedText (snap.status, 14, getHeight() - 56, getWidth() - 28, 34, juce::Justification::left, 2);
     g.setColour (textCol.withAlpha (0.55f));
     g.setFont (12.0f);
     g.drawText ("Key: " + juce::String (snap.keyName) + "    Teal = your melody    Orange = suggested chords",
