@@ -1,3 +1,4 @@
+
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
@@ -81,7 +82,7 @@ VoxChordProcessor::Snapshot VoxChordProcessor::getSnapshot()
 }
 
 //==============================================================================
-// Recording from the microphone (works offline, uses the system default input)
+// Recording from the microphone
 //==============================================================================
 juce::String VoxChordProcessor::startRecording()
 {
@@ -98,7 +99,7 @@ juce::String VoxChordProcessor::startRecording()
         return "No microphone found. Check Windows sound settings, or use 'Load audio file'.";
 
     recSampleRate = dev->getCurrentSampleRate();
-    recBuffer.assign ((size_t) (recSampleRate * 90.0), 0.0f); // up to 90 seconds
+    recBuffer.assign ((size_t) (recSampleRate * 90.0), 0.0f);
     writePos.store (0);
 
     deviceManager = std::move (dm);
@@ -148,7 +149,7 @@ void VoxChordProcessor::audioDeviceIOCallbackWithContext (const float* const* in
 }
 
 //==============================================================================
-// Loading an audio file (wav, mp3, aiff, flac, ogg)
+// Loading an audio file
 //==============================================================================
 void VoxChordProcessor::loadAudioFile (const juce::File& file)
 {
@@ -164,7 +165,7 @@ void VoxChordProcessor::loadAudioFile (const juce::File& file)
         }
 
         const double sr = reader->sampleRate;
-        const int n = (int) juce::jmin ((juce::int64) (sr * 180.0), reader->lengthInSamples); // max 3 minutes
+        const int n = (int) juce::jmin ((juce::int64) (sr * 180.0), reader->lengthInSamples);
         juce::AudioBuffer<float> buf ((int) juce::jmax (1u, reader->numChannels), n);
         reader->read (&buf, 0, n, 0, true, true);
 
@@ -177,7 +178,6 @@ void VoxChordProcessor::loadAudioFile (const juce::File& file)
                 (*mono)[(size_t) i] += r[i] / (float) chans;
         }
 
-        // run the analysis on this same worker thread
         auto frames = vc::trackPitch (*mono, sr);
         auto raw = vc::segmentNotes (frames);
         {
@@ -236,7 +236,7 @@ void VoxChordProcessor::rebuild()
 }
 
 //==============================================================================
-// Real-time playback of the notes / chords as MIDI, locked to the host transport
+// Real-time playback of the notes / chords as MIDI
 //==============================================================================
 void VoxChordProcessor::releaseAllNotes (juce::MidiBuffer& midi, int samplePos)
 {
@@ -275,16 +275,17 @@ void VoxChordProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
     if (bpm < 20.0) bpm = 120.0;
     hostBpm.store (bpm);
 
-    // settings changed while notes are sounding -> let go of everything cleanly
     if (transpose != lastTranspose || wantMel != lastMel || wantChd != lastChd)
         releaseAllNotes (midi, 0);
-    lastTranspose = transpose; lastMel = wantMel; lastChd = wantChd;
+    lastTranspose = transpose;
+    lastMel = wantMel;
+    lastChd = wantChd;
 
     const juce::CriticalSection::ScopedTryLockType lock (dataLock);
 
     if (! lock.isLocked())
     {
-        lockMissed = true; // couldn't read the data this block; clean up on the next one
+        lockMissed = true;
     }
     else if (! playing || loopBeats <= 0.0)
     {
@@ -297,25 +298,23 @@ void VoxChordProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         const double samplesPerBeat = currentSampleRate * 60.0 / bpm;
         const double ppq1 = ppq0 + (double) n / samplesPerBeat;
 
-        // transport jumped (seek / loop) or a block was skipped -> release hanging notes
         if (lockMissed || lastPpqEnd < 0.0 || std::abs (ppq0 - lastPpqEnd) > 0.25)
             releaseAllNotes (midi, 0);
         lockMissed = false;
         lastPpqEnd = ppq1;
 
-        // time (in beats) of the next occurrence of loop-position e inside this block, or -1
         auto occurrence = [&] (double e) -> double
         {
             const double k = std::ceil ((ppq0 - e) / loopBeats - 1.0e-9);
             const double t = e + k * loopBeats;
             return (t >= ppq0 - 1.0e-9 && t < ppq1) ? t : -1.0;
         };
+
         auto sampleOf = [&] (double t)
         {
             return juce::jlimit (0, juce::jmax (0, n - 1), (int) std::floor ((t - ppq0) * samplesPerBeat));
         };
 
-        // pass 1: note-offs (so a retriggered note gets off-then-on)
         if (wantMel)
             for (const auto& nt : notes)
             {
@@ -327,6 +326,7 @@ void VoxChordProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
                     sounding[0][num] = false;
                 }
             }
+
         if (wantChd)
             for (const auto& ch : chords)
             {
@@ -340,7 +340,6 @@ void VoxChordProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
                     }
             }
 
-        // pass 2: note-ons
         if (wantMel)
             for (const auto& nt : notes)
             {
@@ -350,6 +349,7 @@ void VoxChordProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
                 midi.addEvent (juce::MidiMessage::noteOn (1, num, (juce::uint8) nt.vel), sampleOf (t));
                 sounding[0][num] = true;
             }
+
         if (wantChd)
             for (const auto& ch : chords)
             {
@@ -363,7 +363,6 @@ void VoxChordProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
             }
     }
 
-    // built-in preview sound
     if (wantPreview)
         synth.renderNextBlock (buffer, midi, 0, n);
     else if (lastPreview)
@@ -372,7 +371,7 @@ void VoxChordProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
 }
 
 //==============================================================================
-// MIDI file export (drag the .mid into FL Studio's piano roll or playlist)
+// MIDI file export
 //==============================================================================
 bool VoxChordProcessor::exportMidi (const juce::File& file)
 {
@@ -383,6 +382,7 @@ bool VoxChordProcessor::exportMidi (const juce::File& file)
         n = notes;
         c = chords;
     }
+
     if (n.empty())
     {
         setStatus ("Nothing to export yet.");
@@ -394,24 +394,31 @@ bool VoxChordProcessor::exportMidi (const juce::File& file)
     constexpr int ppq = 960;
 
     juce::MidiMessageSequence melody, harmony;
+
     {
         auto tempo = juce::MidiMessage::tempoMetaEvent ((int) (60000000.0 / bpm));
         tempo.setTimeStamp (0.0);
         melody.addEvent (tempo);
     }
 
-    auto addNote = [] (juce::MidiMessageSequence& seq, int ch, int num, int vel, double startBeat, double durBeat)
+    // FIX: Capture ppq explicitly in the lambda.
+    auto addNote = [ppq] (juce::MidiMessageSequence& seq, int ch, int num, int vel,
+                          double startBeat, double durBeat)
     {
         auto on = juce::MidiMessage::noteOn (ch, num, (juce::uint8) vel);
         on.setTimeStamp (startBeat * ppq);
+
         auto off = juce::MidiMessage::noteOff (ch, num);
         off.setTimeStamp ((startBeat + durBeat) * ppq - 1.0);
+
         seq.addEvent (on);
         seq.addEvent (off);
     };
 
     for (const auto& nt : n)
-        addNote (melody, 1, juce::jlimit (0, 127, nt.midi + transpose), nt.vel, nt.startBeat, nt.durBeat);
+        addNote (melody, 1, juce::jlimit (0, 127, nt.midi + transpose),
+                 nt.vel, nt.startBeat, nt.durBeat);
+
     for (const auto& ch : c)
         for (int num : ch.notes)
             addNote (harmony, 2, num, 80, ch.startBeat, ch.durBeat);
@@ -428,18 +435,20 @@ bool VoxChordProcessor::exportMidi (const juce::File& file)
 
     file.deleteFile();
     juce::FileOutputStream os (file);
+
     if (! os.openedOk())
     {
         setStatus ("Could not write the file. Pick another folder.");
         return false;
     }
+
     mf.writeTo (os);
     setStatus ("Saved " + file.getFileName() + " (track 1 = melody, track 2 = chords).");
     return true;
 }
 
 //==============================================================================
-// Saving / loading the project state (so your melody survives closing FL Studio)
+// Saving / loading project state
 //==============================================================================
 void VoxChordProcessor::getStateInformation (juce::MemoryBlock& dest)
 {
@@ -450,8 +459,11 @@ void VoxChordProcessor::getStateInformation (juce::MemoryBlock& dest)
     {
         const juce::ScopedLock sl (dataLock);
         for (const auto& r : rawNotes)
-            s << juce::String (r.startSec, 4) << "," << juce::String (r.durSec, 4) << "," << r.midi << "," << r.vel << ";";
+            s << juce::String (r.startSec, 4) << ","
+              << juce::String (r.durSec, 4) << ","
+              << r.midi << "," << r.vel << ";";
     }
+
     xml->setAttribute ("rawNotes", s);
     copyXmlToBinary (*xml, dest);
 }
@@ -459,25 +471,31 @@ void VoxChordProcessor::getStateInformation (juce::MemoryBlock& dest)
 void VoxChordProcessor::setStateInformation (const void* data, int size)
 {
     std::unique_ptr<juce::XmlElement> xml (getXmlFromBinary (data, size));
+
     if (xml == nullptr || ! xml->hasTagName (apvts.state.getType()))
         return;
 
     std::vector<vc::RawNote> raw;
     juce::StringArray items;
     items.addTokens (xml->getStringAttribute ("rawNotes"), ";", "");
+
     for (const auto& it : items)
     {
         juce::StringArray f;
         f.addTokens (it, ",", "");
+
         if (f.size() == 4)
-            raw.push_back ({ f[0].getDoubleValue(), f[1].getDoubleValue(), f[2].getIntValue(), f[3].getIntValue() });
+            raw.push_back ({ f[0].getDoubleValue(), f[1].getDoubleValue(),
+                             f[2].getIntValue(), f[3].getIntValue() });
     }
 
     apvts.replaceState (juce::ValueTree::fromXml (*xml));
+
     {
         const juce::ScopedLock sl (dataLock);
         rawNotes = raw;
     }
+
     rebuild();
 }
 
